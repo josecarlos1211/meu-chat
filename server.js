@@ -1,7 +1,7 @@
 const http = require('http');
 const fs   = require('fs');
 const path = require('path');
-const { Server } = require('socket.io'); // Trocado de 'ws' para 'socket.io'
+const { Server } = require('socket.io'); // Utiliza socket.io para máxima compatibilidade
 
 const PORT = process.env.PORT || 3000;
 
@@ -24,17 +24,19 @@ const server = http.createServer((req, res) => {
 });
 
 // ── Socket.IO Server ─────────────────────────────────────────
-// Configurado com 'allowEIO3' e CORS aberto para garantir máxima
-// compatibilidade com o mecanismo de Polling do Opera Mini.
+// Configurado com alta tolerância a timeouts para dar suporte
+// estável ao mecanismo de proxy do Opera Mini.
 const io = new Server(server, {
   allowEIO3: true,
-  cors: { origin: "*" }
+  cors: { origin: "*" },
+  pingTimeout: 60000,  // Espera até 60 segundos antes de considerar queda de conexão
+  pingInterval: 25000  // Envia ping de controle a cada 25 segundos
 });
 
 // Mapa de clientes: socket.id -> { name, color }
 const clients = new Map();
 
-// Cores fixas para apelidos
+// Cores fixas para os apelidos
 const COLORS = [
   '#f87171','#fb923c','#fbbf24','#a3e635',
   '#34d399','#22d3ee','#60a5fa','#a78bfa',
@@ -60,16 +62,21 @@ io.on('connection', (socket) => {
   socket.on('message', (rawData) => {
     let data;
     try { 
-      // O Socket.IO às vezes decodifica o JSON automaticamente dependendo do cliente
+      // O Socket.IO pode decodificar o JSON automaticamente dependendo do cliente
       data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData; 
     } catch(e) { return; }
+
+    // Ignora requisições de atualização pura do Opera Mini (usadas apenas para manter o canal vivo)
+    if (data.type === 'poll_refresh') {
+      return;
+    }
 
     // ── Registro ──────────────────────────────────────────
     if (data.type === 'join') {
       let name = String(data.name || '').trim().slice(0, 24);
       if (!name) name = 'Anonimo';
 
-      // Garantir unicidade do nome
+      // Garantir unicidade do apelido
       const taken = new Set();
       clients.forEach(v => taken.add(v.name.toLowerCase()));
       let base = name, i = 2;
@@ -81,7 +88,7 @@ io.on('connection', (socket) => {
       clients.set(socket.id, { name, color });
       registered = true;
 
-      // Confirmar ao próprio usuário
+      // Confirmação para o próprio usuário
       socket.emit('message', JSON.stringify({
         type: 'welcome',
         name,
@@ -90,7 +97,7 @@ io.on('connection', (socket) => {
         users: userList()
       }));
 
-      // Avisar aos demais usuários
+      // Avisa aos outros que um novo usuário entrou
       socket.broadcast.emit('message', JSON.stringify({
         type: 'user_join',
         name,
@@ -110,7 +117,7 @@ io.on('connection', (socket) => {
       const text = String(data.text || '').trim().slice(0, 500);
       if (!text) return;
 
-      // Envia para todos na sala
+      // Distribui a mensagem para todas as conexões ativas
       io.emit('message', JSON.stringify({
         type: 'chat',
         name: me.name,
@@ -121,13 +128,13 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Trata a desconexão do usuário
+  // Trata desconexões de forma segura
   socket.on('disconnect', () => {
     if (!registered) return;
     const me = clients.get(socket.id);
     clients.delete(socket.id);
     
-    // Avisa os outros que o usuário saiu
+    // Avisa os demais usuários sobre a saída do participante
     io.emit('message', JSON.stringify({
       type: 'user_leave',
       name: me.name,

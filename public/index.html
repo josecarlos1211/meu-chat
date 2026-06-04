@@ -357,7 +357,12 @@ function sair() {
 function conectar() {
   intentionalClose = false;
   try {
-    ws = io();
+    // Forçamos o Socket.IO a usar prioritariamente o modo HTTP Polling,
+    // que é o único que o proxy do Opera Mini consegue manter vivo com estabilidade
+    ws = io({
+      transports: ['polling', 'websocket'],
+      upgrade: true
+    });
   } catch(e) {
     erroLogin('Erro ao iniciar conexao.');
     return;
@@ -378,21 +383,28 @@ function conectar() {
   ws.on('disconnect', function() {
     if (intentionalClose) return;
     document.getElementById('offline-bar').style.display = 'block';
+    
+    // Se cair (o que acontece muito no Opera Mini), tenta reconectar imediatamente
+    setTimeout(function() {
+      if (!intentionalClose) conectar();
+    }, 1000);
   });
 
-  // ── SOLUÇÃO EXCLUSIVA PARA OPERA MINI ──
-  // Detecta se o usuário está no Opera Mini
+  // ── AJUSTE DE CONTROLE OPERA MINI ──
   var isOperaMini = (navigator.userAgent.indexOf('Opera Mini') > -1);
-  
   if (isOperaMini) {
-    // Como o Opera Mini não ouve o servidor em tempo real, 
-    // forçamos ele a "pingar" o servidor a cada 4 segundos para buscar atualizações
+    // Executa a cada 3 segundos
     setInterval(function() {
-      if (ws && ws.connected) {
-        // Dispara um evento vazio apenas para forçar o Proxy do Opera a buscar dados pendentes
-        ws.emit('message', JSON.stringify({ type: 'poll_refresh' }));
+      if (ws) {
+        if (ws.connected) {
+          // Se estiver conectado, força o proxy a buscar novas mensagens
+          ws.emit('message', JSON.stringify({ type: 'poll_refresh' }));
+        } else {
+          // Se o proxy derrubou a conexão por inatividade, força a reconexão
+          conectar();
+        }
       }
-    }, 4000); 
+    }, 3000); 
   }
 }
 // ──────────────────────────────────────────────

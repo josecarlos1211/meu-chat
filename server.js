@@ -1,7 +1,7 @@
 const http = require('http');
 const fs   = require('fs');
 const path = require('path');
-const WebSocket = require('ws');
+const { Server } = require('socket.io'); // Trocado de 'ws' para 'socket.io'
 
 const PORT = process.env.PORT || 3000;
 
@@ -23,13 +23,14 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// ── WebSocket server ─────────────────────────────────────────
-const wss = new WebSocket.Server({ server });
+// ── Socket.IO Server ─────────────────────────────────────────
+// Habilitamos 'polling' explicitamente para dar suporte ao Opera Mini
+const io = new Server(server, {
+  allowEIO3: true,
+  cors: { origin: "*" }
+});
 
-// Mapa de clientes: ws -> { name, color }
 const clients = new Map();
-
-// Cores fixas para apelidos (repetidas se necessário)
 const COLORS = [
   '#f87171','#fb923c','#fbbf24','#a3e635',
   '#34d399','#22d3ee','#60a5fa','#a78bfa',
@@ -38,22 +39,7 @@ const COLORS = [
 let colorIndex = 0;
 
 function nextColor() {
-  const c = COLORS[colorIndex % COLORS.length];
-  colorIndex++;
-  return c;
-}
-
-function broadcast(data, exclude) {
-  const msg = JSON.stringify(data);
-  wss.clients.forEach(client => {
-    if (client.readyState === WebSocket.OPEN && client !== exclude) {
-      client.send(msg);
-    }
-  });
-}
-
-function broadcastAll(data) {
-  broadcast(data, null);
+  return COLORS[colorIndex++ % COLORS.length];
 }
 
 function userList() {
@@ -62,19 +48,20 @@ function userList() {
   return list;
 }
 
-wss.on('connection', ws => {
+io.on('connection', (socket) => {
   let registered = false;
 
-  ws.on('message', raw => {
+  socket.on('message', (rawData) => {
     let data;
-    try { data = JSON.parse(raw); } catch(e) { return; }
+    try { 
+      data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData; 
+    } catch(e) { return; }
 
     // ── Registro ──────────────────────────────────────────
     if (data.type === 'join') {
       let name = String(data.name || '').trim().slice(0, 24);
       if (!name) name = 'Anonimo';
 
-      // Garantir unicidade
       const taken = new Set();
       clients.forEach(v => taken.add(v.name.toLowerCase()));
       let base = name, i = 2;
@@ -83,11 +70,11 @@ wss.on('connection', ws => {
       }
 
       const color = nextColor();
-      clients.set(ws, { name, color });
+      clients.set(socket.id, { name, color });
       registered = true;
 
       // Confirmar ao próprio usuário
-      ws.send(JSON.stringify({
+      socket.emit('message', JSON.stringify({
         type: 'welcome',
         name,
         color,
@@ -96,50 +83,47 @@ wss.on('connection', ws => {
       }));
 
       // Avisar aos demais
-      broadcast({
+      socket.broadcast.emit('message', JSON.stringify({
         type: 'user_join',
         name,
         color,
         onlineCount: clients.size,
         users: userList()
-      }, ws);
+      }));
 
       return;
     }
 
     if (!registered) return;
-    const me = clients.get(ws);
+    const me = clients.get(socket.id);
 
     // ── Mensagem de chat ───────────────────────────────────
     if (data.type === 'chat') {
       const text = String(data.text || '').trim().slice(0, 500);
       if (!text) return;
 
-      broadcastAll({
+      io.emit('message', JSON.stringify({
         type: 'chat',
         name: me.name,
         color: me.color,
         text,
         ts: Date.now()
-      });
+      }));
     }
   });
 
-  ws.on('close', () => {
+  socket.on('disconnect', () => {
     if (!registered) return;
-    const me = clients.get(ws);
-    clients.delete(ws);
-    broadcast({
+    const me = clients.get(socket.id);
+    clients.delete(socket.id);
+    
+    io.emit('message', JSON.stringify({
       type: 'user_leave',
       name: me.name,
       color: me.color,
       onlineCount: clients.size,
       users: userList()
-    }, null);
-  });
-
-  ws.on('error', () => {
-    clients.delete(ws);
+    }));
   });
 });
 

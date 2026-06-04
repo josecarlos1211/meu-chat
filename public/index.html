@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<title>ChatLivre</title>
+<style>
+/* ===== RESET ===== */
+* { margin:0; padding:0; }
+html { height:100%; }
+body {
+  height:100%;
+  background: #0f1923;
+  color: #d4dde8;
+  font-family: "Courier New", Courier, monospace;
+  font-size: 14px;
+  overflow: hidden;
+}
+
+/* ===== TELA DE ENTRADA ===== */
+#screen-login {
+  position: fixed;
+  top:0; left:0; right:0; bottom:0;
+  background: #0f1923;
+  display: table;
+  width: 100%;
+  height: 100%;
+  z-index: 10;
+}
+#login-inner {
+  display: table-cell;
+  vertical-align: middle;
+  text-align: center;
+  padding: 20px;
+}
+#login-box {
+  display: inline-block;
+  width: 100%;
+  max-width: 320px;
+  background: #162030;
+  border: 1px solid #1e3a52;
+  border-radius: 6px;
+  padding: 28px 20px;
+  text-align: left;
+}
+#login-box h1 {
+  font-size: 20px;
+  color: #4fc3f7;
+  text-align: center;
+  margin-bottom: 4px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+}
+#login-box .sub {
+  text-align: center;
+  font-size: 11px;
+  color: #456070;
+  margin-bottom: 22px;
+  letter-spacing: 1px;
+}
+#login-box label {
+  display: block;
+  font-size: 11px;
+  color: #456070;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+#input-name {
+  width: 100%;
+  background: #0f1923;
+  border: 1px solid #1e3a52;
+  border-radius: 4px;
+  color: #d4dde8;
+  font-family: "Courier New", monospace;
+  font-size: 15px;
+  padding: 10px 12px;
+  outline: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  margin-bottom: 14px;
+}
+#input-name:focus { border-color: #4fc3f7; }
+#btn-entrar {
+  width: 100%;
+  background: #0d3050;
+  border: 1px solid #4fc3f7;
+  color: #4fc3f7;
+  font-family: "Courier New", monospace;
+  font-size: 14px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  padding: 11px;
+  border-radius: 4px;
+  cursor: pointer;
+  -webkit-appearance: none;
+}
+#btn-entrar:active { background: #0a2540; }
+#login-error {
+  color: #ef5350;
+  font-size: 12px;
+  text-align: center;
+  margin-top: 10px;
+  min-height: 18px;
+}
+
+/* ===== LAYOUT PRINCIPAL ===== */
+#screen-chat {
+  display: none;
+  position: fixed;
+  top:0; left:0; right:0; bottom:0;
+  /* layout em bloco para Android 4 (sem flexbox) */
+}
+
+/* HEADER */
+#chat-header {
+  position: absolute;
+  top:0; left:0; right:0;
+  height: 44px;
+  background: #0d1c2a;
+  border-bottom: 1px solid #1e3a52;
+  padding: 0 12px;
+  line-height: 44px;
+  overflow: hidden;
+}
+#header-title {
+  display: inline-block;
+  font-size: 15px;
+  color: #4fc3f7;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+#header-online {
+  display: inline-block;
+  font-size: 11px;
+  color: #456070;
+  vertical-align: middle;
+  margin-left: 10px;
+}
+#header-online span {
+  color: #4caf50;
+  font-weight: bold;
+}
+#btn-sair {
+  float: right;
+  background: none;
+  border: none;
+  color: #ef5350;
+  font-family: "Courier New", monospace;
+  font-size: 12px;
+  cursor: pointer;
+  line-height: 44px;
+  padding: 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+/* MENSAGENS */
+#msgs-wrap {
+  position: absolute;
+  top: 44px;
+  left: 0; right: 0;
+  bottom: 52px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  padding: 10px 10px 4px;
+  background: #0f1923;
+}
+
+/* Balao de mensagem */
+.msg {
+  margin-bottom: 10px;
+  word-wrap: break-word;
+  word-break: break-word;
+}
+.msg-meta {
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+.msg-name { font-weight: bold; }
+.msg-time { color: #2a4a62; margin-left: 6px; font-size: 10px; }
+.msg-text {
+  background: #162030;
+  border-left: 2px solid #1e3a52;
+  padding: 6px 10px;
+  border-radius: 0 4px 4px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #c8d8e8;
+}
+.msg.own .msg-text {
+  background: #0d2a40;
+  border-left-color: #4fc3f7;
+  color: #d8eef8;
+}
+
+/* Mensagem de sistema */
+.msg-sys {
+  text-align: center;
+  font-size: 11px;
+  color: #2a4a62;
+  margin: 6px 0;
+  font-style: italic;
+}
+.msg-sys span { color: #456080; }
+
+/* INPUT BAR */
+#input-bar {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 52px;
+  background: #0d1c2a;
+  border-top: 1px solid #1e3a52;
+  padding: 8px;
+  /* table layout para compatibilidade */
+  display: table;
+  width: 100%;
+  -webkit-box-sizing: border-box;
+  box-sizing: border-box;
+}
+#input-cell {
+  display: table-cell;
+  width: 100%;
+  padding-right: 6px;
+}
+#input-cell input {
+  width: 100%;
+  background: #0f1923;
+  border: 1px solid #1e3a52;
+  border-radius: 4px;
+  color: #d4dde8;
+  font-family: "Courier New", monospace;
+  font-size: 14px;
+  padding: 8px 10px;
+  outline: none;
+  -webkit-appearance: none;
+  -webkit-box-sizing: border-box;
+  box-sizing: border-box;
+}
+#input-cell input:focus { border-color: #4fc3f7; }
+#send-cell {
+  display: table-cell;
+  width: 44px;
+}
+#btn-send {
+  width: 44px;
+  height: 36px;
+  background: #0d3050;
+  border: 1px solid #4fc3f7;
+  border-radius: 4px;
+  color: #4fc3f7;
+  font-size: 16px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  vertical-align: middle;
+}
+#btn-send:active { background: #0a2540; }
+
+/* STATUS OFFLINE */
+#offline-bar {
+  display: none;
+  position: fixed;
+  top: 44px; left:0; right:0;
+  background: #3a0a0a;
+  border-bottom: 1px solid #c62828;
+  color: #ef9a9a;
+  font-size: 12px;
+  text-align: center;
+  padding: 5px;
+  z-index: 5;
+}
+</style>
+</head>
+<body>
+
+<!-- ===== TELA LOGIN ===== -->
+<div id="screen-login">
+  <div id="login-inner">
+    <div id="login-box">
+      <h1>ChatLivre</h1>
+      <p class="sub">chat publico em tempo real</p>
+
+      <label for="input-name">Seu apelido</label>
+      <input type="text" id="input-name" maxlength="24" placeholder="Ex: Joao123" autocomplete="off">
+
+      <button id="btn-entrar" onclick="entrar()">Entrar no Chat</button>
+      <div id="login-error"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== TELA CHAT ===== -->
+<div id="screen-chat">
+
+  <div id="offline-bar">&#9888; Sem conexao. Reconectando...</div>
+
+  <!-- Header -->
+  <div id="chat-header">
+    <span id="header-title">ChatLivre</span>
+    <span id="header-online">&#9679; <span id="online-count">0</span> online</span>
+    <button id="btn-sair" onclick="sair()">Sair</button>
+  </div>
+
+  <!-- Mensagens -->
+  <div id="msgs-wrap" id="msgs-wrap"></div>
+
+  <!-- Input -->
+  <div id="input-bar">
+    <div id="input-cell">
+      <input type="text" id="msg-input" placeholder="Digite uma mensagem..." maxlength="500" autocomplete="off" onkeydown="teclaEnter(event)">
+    </div>
+    <div id="send-cell">
+      <button id="btn-send" onclick="enviar()">&#9658;</button>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ──────────────────────────────────────────────
+// CONFIGURACAO
+// ──────────────────────────────────────────────
+// URL do WebSocket — detecta automaticamente o host
+var WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
+
+var ws          = null;
+var myName      = '';
+var myColor     = '#4fc3f7';
+var reconnTimer = null;
+var reconnDelay = 2000;
+var intentionalClose = false;
+
+// ──────────────────────────────────────────────
+// ENTRAR
+// ──────────────────────────────────────────────
+function entrar() {
+  var name = document.getElementById('input-name').value.trim();
+  if (!name) {
+    document.getElementById('login-error').innerHTML = 'Digite um apelido.';
+    return;
+  }
+  document.getElementById('login-error').innerHTML = '';
+  myName = name;
+  document.getElementById('btn-entrar').disabled = true;
+  document.getElementById('btn-entrar').innerHTML = 'Conectando...';
+  conectar();
+}
+
+function sair() {
+  intentionalClose = true;
+  if (ws) ws.close();
+  document.getElementById('screen-chat').style.display = 'none';
+  document.getElementById('screen-login').style.display = 'table';
+  document.getElementById('btn-entrar').disabled = false;
+  document.getElementById('btn-entrar').innerHTML = 'Entrar no Chat';
+  document.getElementById('msgs-wrap').innerHTML = '';
+}
+
+// ──────────────────────────────────────────────
+// WEBSOCKET
+// ──────────────────────────────────────────────
+function conectar() {
+  intentionalClose = false;
+  try {
+    ws = new WebSocket(WS_URL);
+  } catch(e) {
+    erroLogin('WebSocket nao suportado neste navegador.');
+    return;
+  }
+
+  ws.onopen = function() {
+    clearTimeout(reconnTimer);
+    reconnDelay = 2000;
+    document.getElementById('offline-bar').style.display = 'none';
+    ws.send(JSON.stringify({ type: 'join', name: myName }));
+  };
+
+  ws.onmessage = function(e) {
+    var data;
+    try { data = JSON.parse(e.data); } catch(err) { return; }
+    handleMsg(data);
+  };
+
+  ws.onclose = function() {
+    if (intentionalClose) return;
+    document.getElementById('offline-bar').style.display = 'block';
+    reconnTimer = setTimeout(function() {
+      reconnDelay = Math.min(reconnDelay * 2, 30000);
+      conectar();
+    }, reconnDelay);
+  };
+
+  ws.onerror = function() {
+    // onclose vai disparar logo após
+  };
+}
+
+// ──────────────────────────────────────────────
+// TRATAR MENSAGENS DO SERVIDOR
+// ──────────────────────────────────────────────
+function handleMsg(data) {
+  if (data.type === 'welcome') {
+    myName  = data.name;
+    myColor = data.color;
+    atualizarOnline(data.onlineCount);
+    // Mostrar chat
+    document.getElementById('screen-login').style.display = 'none';
+    document.getElementById('screen-chat').style.display = 'block';
+    addSys('Bem-vindo, <span style="color:' + esc(myColor) + '">' + esc(myName) + '</span>! Voce entrou na sala.');
+    document.getElementById('msg-input').focus();
+  }
+  else if (data.type === 'user_join') {
+    atualizarOnline(data.onlineCount);
+    addSys('<span style="color:' + esc(data.color) + '">' + esc(data.name) + '</span> entrou na sala.');
+  }
+  else if (data.type === 'user_leave') {
+    atualizarOnline(data.onlineCount);
+    addSys('<span style="color:' + esc(data.color) + '">' + esc(data.name) + '</span> saiu da sala.');
+  }
+  else if (data.type === 'chat') {
+    var own = (data.name === myName);
+    addMsg(data.name, data.color, data.text, data.ts, own);
+  }
+}
+
+// ──────────────────────────────────────────────
+// ENVIAR MENSAGEM
+// ──────────────────────────────────────────────
+function enviar() {
+  var inp  = document.getElementById('msg-input');
+  var text = inp.value.trim();
+  if (!text) return;
+  if (!ws || ws.readyState !== 1) {
+    addSys('Sem conexao. Aguarde...');
+    return;
+  }
+  ws.send(JSON.stringify({ type: 'chat', text: text }));
+  inp.value = '';
+  inp.focus();
+}
+
+function teclaEnter(e) {
+  var key = e.keyCode || e.which;
+  if (key === 13) enviar();
+}
+
+// ──────────────────────────────────────────────
+// RENDERIZAR MENSAGENS
+// ──────────────────────────────────────────────
+function addMsg(name, color, text, ts, own) {
+  var box   = document.getElementById('msgs-wrap');
+  var time  = formatTime(ts);
+  var div   = document.createElement('div');
+  div.className = 'msg' + (own ? ' own' : '');
+  div.innerHTML =
+    '<div class="msg-meta">' +
+      '<span class="msg-name" style="color:' + esc(color) + '">' + esc(name) + '</span>' +
+      '<span class="msg-time">' + time + '</span>' +
+    '</div>' +
+    '<div class="msg-text">' + esc(text) + '</div>';
+  box.appendChild(div);
+  scrollBottom();
+}
+
+function addSys(html) {
+  var box = document.getElementById('msgs-wrap');
+  var div = document.createElement('div');
+  div.className = 'msg-sys';
+  div.innerHTML = html;
+  box.appendChild(div);
+  scrollBottom();
+}
+
+function scrollBottom() {
+  var box = document.getElementById('msgs-wrap');
+  box.scrollTop = box.scrollHeight;
+}
+
+// ──────────────────────────────────────────────
+// UTILITARIOS
+// ──────────────────────────────────────────────
+function atualizarOnline(n) {
+  document.getElementById('online-count').innerHTML = n;
+}
+
+function erroLogin(msg) {
+  document.getElementById('login-error').innerHTML = msg;
+  document.getElementById('btn-entrar').disabled = false;
+  document.getElementById('btn-entrar').innerHTML = 'Entrar no Chat';
+}
+
+function formatTime(ts) {
+  var d = ts ? new Date(ts) : new Date();
+  var h = d.getHours();
+  var m = d.getMinutes();
+  return (h < 10 ? '0' : '') + h + ':' + (m < 10 ? '0' : '') + m;
+}
+
+function esc(s) {
+  return String(s || '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+// Enter na tela de login
+document.getElementById('input-name').onkeydown = function(e) {
+  var k = e.keyCode || e.which;
+  if (k === 13) entrar();
+};
+</script>
+</body>
+</html>

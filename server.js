@@ -24,13 +24,17 @@ const server = http.createServer((req, res) => {
 });
 
 // ── Socket.IO Server ─────────────────────────────────────────
-// Habilitamos 'polling' explicitamente para dar suporte ao Opera Mini
+// Configurado com 'allowEIO3' e CORS aberto para garantir máxima
+// compatibilidade com o mecanismo de Polling do Opera Mini.
 const io = new Server(server, {
   allowEIO3: true,
   cors: { origin: "*" }
 });
 
+// Mapa de clientes: socket.id -> { name, color }
 const clients = new Map();
+
+// Cores fixas para apelidos
 const COLORS = [
   '#f87171','#fb923c','#fbbf24','#a3e635',
   '#34d399','#22d3ee','#60a5fa','#a78bfa',
@@ -39,7 +43,9 @@ const COLORS = [
 let colorIndex = 0;
 
 function nextColor() {
-  return COLORS[colorIndex++ % COLORS.length];
+  const c = COLORS[colorIndex % COLORS.length];
+  colorIndex++;
+  return c;
 }
 
 function userList() {
@@ -54,6 +60,7 @@ io.on('connection', (socket) => {
   socket.on('message', (rawData) => {
     let data;
     try { 
+      // O Socket.IO às vezes decodifica o JSON automaticamente dependendo do cliente
       data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData; 
     } catch(e) { return; }
 
@@ -62,6 +69,7 @@ io.on('connection', (socket) => {
       let name = String(data.name || '').trim().slice(0, 24);
       if (!name) name = 'Anonimo';
 
+      // Garantir unicidade do nome
       const taken = new Set();
       clients.forEach(v => taken.add(v.name.toLowerCase()));
       let base = name, i = 2;
@@ -82,7 +90,7 @@ io.on('connection', (socket) => {
         users: userList()
       }));
 
-      // Avisar aos demais
+      // Avisar aos demais usuários
       socket.broadcast.emit('message', JSON.stringify({
         type: 'user_join',
         name,
@@ -102,6 +110,7 @@ io.on('connection', (socket) => {
       const text = String(data.text || '').trim().slice(0, 500);
       if (!text) return;
 
+      // Envia para todos na sala
       io.emit('message', JSON.stringify({
         type: 'chat',
         name: me.name,
@@ -112,11 +121,13 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Trata a desconexão do usuário
   socket.on('disconnect', () => {
     if (!registered) return;
     const me = clients.get(socket.id);
     clients.delete(socket.id);
     
+    // Avisa os outros que o usuário saiu
     io.emit('message', JSON.stringify({
       type: 'user_leave',
       name: me.name,

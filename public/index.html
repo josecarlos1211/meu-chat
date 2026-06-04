@@ -110,7 +110,6 @@ body {
   display: none;
   position: fixed;
   top:0; left:0; right:0; bottom:0;
-  /* layout em bloco para Android 4 (sem flexbox) */
 }
 
 /* HEADER */
@@ -215,7 +214,6 @@ body {
   background: #0d1c2a;
   border-top: 1px solid #1e3a52;
   padding: 8px;
-  /* table layout para compatibilidade */
   display: table;
   width: 100%;
   -webkit-box-sizing: border-box;
@@ -276,7 +274,6 @@ body {
 </head>
 <body>
 
-<!-- ===== TELA LOGIN ===== -->
 <div id="screen-login">
   <div id="login-inner">
     <div id="login-box">
@@ -292,22 +289,18 @@ body {
   </div>
 </div>
 
-<!-- ===== TELA CHAT ===== -->
 <div id="screen-chat">
 
   <div id="offline-bar">&#9888; Sem conexao. Reconectando...</div>
 
-  <!-- Header -->
   <div id="chat-header">
     <span id="header-title">ChatLivre</span>
     <span id="header-online">&#9679; <span id="online-count">0</span> online</span>
     <button id="btn-sair" onclick="sair()">Sair</button>
   </div>
 
-  <!-- Mensagens -->
-  <div id="msgs-wrap" id="msgs-wrap"></div>
+  <div id="msgs-wrap"></div>
 
-  <!-- Input -->
   <div id="input-bar">
     <div id="input-cell">
       <input type="text" id="msg-input" placeholder="Digite uma mensagem..." maxlength="500" autocomplete="off" onkeydown="teclaEnter(event)">
@@ -319,18 +312,17 @@ body {
 
 </div>
 
+<script src="/socket.io/socket.io.js"></script>
+
 <script>
 // ──────────────────────────────────────────────
 // CONFIGURACAO
 // ──────────────────────────────────────────────
-// URL do WebSocket — detecta automaticamente o host
-var WS_URL = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host;
-
+// O Socket.IO gerencia a URL automaticamente
 var ws          = null;
 var myName      = '';
 var myColor     = '#4fc3f7';
 var reconnTimer = null;
-var reconnDelay = 2000;
 var intentionalClose = false;
 
 // ──────────────────────────────────────────────
@@ -360,42 +352,34 @@ function sair() {
 }
 
 // ──────────────────────────────────────────────
-// WEBSOCKET
+// CONEXÃO (MODIFICADA PARA SOCKET.IO)
 // ──────────────────────────────────────────────
 function conectar() {
   intentionalClose = false;
   try {
-    ws = new WebSocket(WS_URL);
+    // Inicializa o Socket.IO (funciona via WebSocket ou Polling automaticamente)
+    ws = io();
   } catch(e) {
-    erroLogin('WebSocket nao suportado neste navegador.');
+    erroLogin('Erro ao iniciar conexao.');
     return;
   }
 
-  ws.onopen = function() {
+  ws.on('connect', function() {
     clearTimeout(reconnTimer);
-    reconnDelay = 2000;
     document.getElementById('offline-bar').style.display = 'none';
-    ws.send(JSON.stringify({ type: 'join', name: myName }));
-  };
+    ws.emit('message', JSON.stringify({ type: 'join', name: myName }));
+  });
 
-  ws.onmessage = function(e) {
+  ws.on('message', function(msg) {
     var data;
-    try { data = JSON.parse(e.data); } catch(err) { return; }
+    try { data = JSON.parse(msg); } catch(err) { return; }
     handleMsg(data);
-  };
+  });
 
-  ws.onclose = function() {
+  ws.on('disconnect', function() {
     if (intentionalClose) return;
     document.getElementById('offline-bar').style.display = 'block';
-    reconnTimer = setTimeout(function() {
-      reconnDelay = Math.min(reconnDelay * 2, 30000);
-      conectar();
-    }, reconnDelay);
-  };
-
-  ws.onerror = function() {
-    // onclose vai disparar logo após
-  };
+  });
 }
 
 // ──────────────────────────────────────────────
@@ -427,17 +411,17 @@ function handleMsg(data) {
 }
 
 // ──────────────────────────────────────────────
-// ENVIAR MENSAGEM
+// ENVIAR MENSAGEM (MODIFICADA PARA SOCKET.IO)
 // ──────────────────────────────────────────────
 function enviar() {
   var inp  = document.getElementById('msg-input');
   var text = inp.value.trim();
   if (!text) return;
-  if (!ws || ws.readyState !== 1) {
+  if (!ws || !ws.connected) {
     addSys('Sem conexao. Aguarde...');
     return;
   }
-  ws.send(JSON.stringify({ type: 'chat', text: text }));
+  ws.emit('message', JSON.stringify({ type: 'chat', text: text }));
   inp.value = '';
   inp.focus();
 }

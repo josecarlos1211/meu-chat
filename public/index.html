@@ -357,7 +357,6 @@ function sair() {
 function conectar() {
   intentionalClose = false;
   try {
-    // Inicializa o Socket.IO (funciona via WebSocket ou Polling automaticamente)
     ws = io();
   } catch(e) {
     erroLogin('Erro ao iniciar conexao.');
@@ -380,8 +379,22 @@ function conectar() {
     if (intentionalClose) return;
     document.getElementById('offline-bar').style.display = 'block';
   });
-}
 
+  // ── SOLUÇÃO EXCLUSIVA PARA OPERA MINI ──
+  // Detecta se o usuário está no Opera Mini
+  var isOperaMini = (navigator.userAgent.indexOf('Opera Mini') > -1);
+  
+  if (isOperaMini) {
+    // Como o Opera Mini não ouve o servidor em tempo real, 
+    // forçamos ele a "pingar" o servidor a cada 4 segundos para buscar atualizações
+    setInterval(function() {
+      if (ws && ws.connected) {
+        // Dispara um evento vazio apenas para forçar o Proxy do Opera a buscar dados pendentes
+        ws.emit('message', JSON.stringify({ type: 'poll_refresh' }));
+      }
+    }, 4000); 
+  }
+}
 // ──────────────────────────────────────────────
 // TRATAR MENSAGENS DO SERVIDOR
 // ──────────────────────────────────────────────

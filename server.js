@@ -1,150 +1,155 @@
 const http = require('http');
 const fs   = require('fs');
 const path = require('path');
-const { Server } = require('socket.io'); // Utiliza socket.io para máxima compatibilidade
+const { Server } = require('socket.io');
 
 const PORT = process.env.PORT || 3000;
 
-// ── HTTP server ─────────────────────────────────────────────
+// ── HTTP server ──────────────────────────────────────────────
+// O Socket.IO injeta automaticamente a rota /socket.io/socket.io.js
+// Este handler só precisa servir os arquivos estáticos da pasta public/
 const server = http.createServer((req, res) => {
-  const url = req.url === '/' ? '/index.html' : req.url;
-  const file = path.join(__dirname, 'public', url);
+  // Ignora rotas do socket.io (tratadas pelo engine do socket.io)
+  if (req.url && req.url.indexOf('/socket.io') === 0) {
+    res.writeHead(404);
+    res.end('Not found');
+    return;
+  }
+
+  const urlPath = req.url === '/' ? '/index.html' : req.url.split('?')[0];
+  const file    = path.join(__dirname, 'public', urlPath);
+
+  // Previne path traversal
+  if (file.indexOf(path.join(__dirname, 'public')) !== 0) {
+    res.writeHead(403); res.end('Forbidden'); return;
+  }
 
   fs.readFile(file, (err, data) => {
-    if (err) {
-      res.writeHead(404);
-      res.end('Not found');
-      return;
-    }
-    const ext = path.extname(file);
-    const mime = { '.html': 'text/html', '.css': 'text/css', '.js': 'application/javascript' };
+    if (err) { res.writeHead(404); res.end('Not found'); return; }
+    const ext  = path.extname(file);
+    const mime = { '.html':'text/html', '.css':'text/css', '.js':'application/javascript' };
     res.writeHead(200, { 'Content-Type': mime[ext] || 'text/plain' });
     res.end(data);
   });
 });
 
-// ── Socket.IO Server ─────────────────────────────────────────
-// Configurado com alta tolerância a timeouts para dar suporte
-// estável ao mecanismo de proxy do Opera Mini.
+// ── Socket.IO ────────────────────────────────────────────────
+// transports: polling primeiro, depois upgrade para websocket
+// Isso garante que Opera Mini (que só aceita polling) funcione
+// e browsers modernos ainda usem WebSocket quando possível
 const io = new Server(server, {
   allowEIO3: true,
-  cors: { origin: "*" },
-  pingTimeout: 60000,  // Espera até 60 segundos antes de considerar queda de conexão
-  pingInterval: 25000  // Envia ping de controle a cada 25 segundos
+  cors: { origin: '*' },
+  pingTimeout:  60000,   // 60s sem resposta = desconectado
+  pingInterval: 20000,   // ping a cada 20s para manter vivo pelo proxy
+  transports: ['polling', 'websocket'],
+  httpCompression: false // desliga compressão — Opera Mini às vezes não descomprime
 });
 
-// Mapa de clientes: socket.id -> { name, color }
-const clients = new Map();
+// ── Estado global ────────────────────────────────────────────
+const clients = new Map(); // socket.id -> { name, color }
 
-// Cores fixas para os apelidos
 const COLORS = [
   '#f87171','#fb923c','#fbbf24','#a3e635',
   '#34d399','#22d3ee','#60a5fa','#a78bfa',
   '#f472b6','#e879f9','#94a3b8','#86efac'
 ];
 let colorIndex = 0;
+function nextColor() { return COLORS[(colorIndex++) % COLORS.length]; }
 
-function nextColor() {
-  const c = COLORS[colorIndex % COLORS.length];
-  colorIndex++;
-  return c;
-}
-
+function onlineCount() { return clients.size; }
 function userList() {
   const list = [];
   clients.forEach(v => list.push({ name: v.name, color: v.color }));
   return list;
 }
+function takenNames() {
+  const s = new Set();
+  clients.forEach(v => s.add(v.name.toLowerCase()));
+  return s;
+}
+function uniqueName(raw) {
+  let name = String(raw || '').trim().slice(0, 24) || 'Anonimo';
+  const taken = takenNames();
+  let base = name, i = 2;
+  while (taken.has(name.toLowerCase())) name = base + (i++);
+  return name;
+}
 
+// Histórico das últimas 50 mensagens (para mostrar ao entrar)
+const history = [];
+function pushHistory(msg) {
+  history.push(msg);
+  if (history.length > 50) history.shift();
+}
+
+// ── Eventos Socket.IO ────────────────────────────────────────
 io.on('connection', (socket) => {
   let registered = false;
 
   socket.on('message', (rawData) => {
     let data;
-    try { 
-      // O Socket.IO pode decodificar o JSON automaticamente dependendo do cliente
-      data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData; 
+    try {
+      data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
     } catch(e) { return; }
 
-    // Ignora requisições de atualização pura do Opera Mini (usadas apenas para manter o canal vivo)
-    if (data.type === 'poll_refresh') {
-      return;
-    }
+    // Opera Mini envia poll_refresh para manter o canal vivo — só ignorar
+    if (data.type === 'poll_refresh') return;
 
-    // ── Registro ──────────────────────────────────────────
+    // ── JOIN ─────────────────────────────────────────────
     if (data.type === 'join') {
-      let name = String(data.name || '').trim().slice(0, 24);
-      if (!name) name = 'Anonimo';
-
-      // Garantir unicidade do apelido
-      const taken = new Set();
-      clients.forEach(v => taken.add(v.name.toLowerCase()));
-      let base = name, i = 2;
-      while (taken.has(name.toLowerCase())) {
-        name = base + i++;
-      }
-
+      if (registered) return; // evita duplo registro
+      const name  = uniqueName(data.name);
       const color = nextColor();
       clients.set(socket.id, { name, color });
       registered = true;
 
-      // Confirmação para o próprio usuário
+      // Boas-vindas com histórico para o próprio usuário
       socket.emit('message', JSON.stringify({
         type: 'welcome',
         name,
         color,
-        onlineCount: clients.size,
-        users: userList()
+        onlineCount: onlineCount(),
+        history: history.slice(-30)
       }));
 
-      // Avisa aos outros que um novo usuário entrou
-      socket.broadcast.emit('message', JSON.stringify({
-        type: 'user_join',
-        name,
-        color,
-        onlineCount: clients.size,
-        users: userList()
-      }));
-
+      // Avisa os demais
+      const joinMsg = { type:'user_join', name, color, onlineCount: onlineCount() };
+      pushHistory({ type:'user_join', name, color, ts: Date.now() });
+      socket.broadcast.emit('message', JSON.stringify(joinMsg));
       return;
     }
 
     if (!registered) return;
     const me = clients.get(socket.id);
+    if (!me) return;
 
-    // ── Mensagem de chat ───────────────────────────────────
+    // ── CHAT ─────────────────────────────────────────────
     if (data.type === 'chat') {
       const text = String(data.text || '').trim().slice(0, 500);
       if (!text) return;
-
-      // Distribui a mensagem para todas as conexões ativas
-      io.emit('message', JSON.stringify({
-        type: 'chat',
-        name: me.name,
-        color: me.color,
-        text,
-        ts: Date.now()
-      }));
+      const msg = { type:'chat', name:me.name, color:me.color, text, ts:Date.now() };
+      pushHistory(msg);
+      io.emit('message', JSON.stringify(msg));
     }
   });
 
-  // Trata desconexões de forma segura
+  // ── DISCONNECT ───────────────────────────────────────────
   socket.on('disconnect', () => {
     if (!registered) return;
     const me = clients.get(socket.id);
+    if (!me) return;
     clients.delete(socket.id);
-    
-    // Avisa os demais usuários sobre a saída do participante
-    io.emit('message', JSON.stringify({
-      type: 'user_leave',
-      name: me.name,
-      color: me.color,
-      onlineCount: clients.size,
-      users: userList()
-    }));
+    const leaveMsg = { type:'user_leave', name:me.name, color:me.color, onlineCount:onlineCount() };
+    pushHistory({ type:'user_leave', name:me.name, color:me.color, ts: Date.now() });
+    io.emit('message', JSON.stringify(leaveMsg));
+  });
+
+  socket.on('error', () => {
+    clients.delete(socket.id);
   });
 });
 
 server.listen(PORT, () => {
-  console.log('Chat server running on port ' + PORT);
+  console.log('ChatLivre rodando na porta ' + PORT);
 });

@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <title>ChatLivre</title>
+<script>
+// Redireciona Opera Mini para a versão compatível antes de qualquer coisa
+if ((navigator.userAgent||'').indexOf('Opera Mini') > -1) {
+  location.replace('/mini.html');
+}
+</script>
 <style>
 * { margin:0; padding:0; }
 html { height:100%; }

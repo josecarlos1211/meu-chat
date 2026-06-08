@@ -5,50 +5,9 @@ const { Server } = require('socket.io');
 
 const PORT = process.env.PORT || 3000;
 
-// ── HTTP server ──────────────────────────────────────────────
-// O Socket.IO injeta automaticamente a rota /socket.io/socket.io.js
-// Este handler só precisa servir os arquivos estáticos da pasta public/
-const server = http.createServer((req, res) => {
-  // Ignora rotas do socket.io (tratadas pelo engine do socket.io)
-  if (req.url && req.url.indexOf('/socket.io') === 0) {
-    res.writeHead(404);
-    res.end('Not found');
-    return;
-  }
-
-  const urlPath = req.url === '/' ? '/index.html' : req.url.split('?')[0];
-  const file    = path.join(__dirname, 'public', urlPath);
-
-  // Previne path traversal
-  if (file.indexOf(path.join(__dirname, 'public')) !== 0) {
-    res.writeHead(403); res.end('Forbidden'); return;
-  }
-
-  fs.readFile(file, (err, data) => {
-    if (err) { res.writeHead(404); res.end('Not found'); return; }
-    const ext  = path.extname(file);
-    const mime = { '.html':'text/html', '.css':'text/css', '.js':'application/javascript' };
-    res.writeHead(200, { 'Content-Type': mime[ext] || 'text/plain' });
-    res.end(data);
-  });
-});
-
-// ── Socket.IO ────────────────────────────────────────────────
-// transports: polling primeiro, depois upgrade para websocket
-// Isso garante que Opera Mini (que só aceita polling) funcione
-// e browsers modernos ainda usem WebSocket quando possível
-const io = new Server(server, {
-  allowEIO3: true,
-  cors: { origin: '*' },
-  pingTimeout:  60000,   // 60s sem resposta = desconectado
-  pingInterval: 20000,   // ping a cada 20s para manter vivo pelo proxy
-  transports: ['polling', 'websocket'],
-  httpCompression: false // desliga compressão — Opera Mini às vezes não descomprime
-});
-
-// ── Estado global ────────────────────────────────────────────
-const clients = new Map(); // socket.id -> { name, color }
-
+// ════════════════════════════════════════════════════════════
+// ESTADO COMPARTILHADO (Socket.IO + Opera Mini)
+// ════════════════════════════════════════════════════════════
 const COLORS = [
   '#f87171','#fb923c','#fbbf24','#a3e635',
   '#34d399','#22d3ee','#60a5fa','#a78bfa',
@@ -57,15 +16,44 @@ const COLORS = [
 let colorIndex = 0;
 function nextColor() { return COLORS[(colorIndex++) % COLORS.length]; }
 
-function onlineCount() { return clients.size; }
-function userList() {
-  const list = [];
-  clients.forEach(v => list.push({ name: v.name, color: v.color }));
-  return list;
+// Histórico global — usado pelos dois modos
+const history = [];
+function pushHistory(msg) {
+  msg.id = Date.now() + Math.random();
+  history.push(msg);
+  if (history.length > 100) history.shift();
 }
+
+// Clientes Socket.IO
+const wsClients = new Map(); // socket.id -> { name, color }
+
+// Sessões Opera Mini: token -> { name, color, lastSeen }
+const miniSessions = new Map();
+
+// Limpa sessões Opera Mini inativas (> 40s)
+setInterval(() => {
+  const now = Date.now();
+  miniSessions.forEach((sess, token) => {
+    if (now - sess.lastSeen > 40000) {
+      miniSessions.delete(token);
+      const msg = { type:'user_leave', name:sess.name, color:sess.color, ts:Date.now() };
+      pushHistory(msg);
+      broadcastWS(msg);
+    }
+  });
+}, 15000);
+
+function broadcastWS(data) {
+  const txt = JSON.stringify(data);
+  wsClients.forEach((_, s) => {
+    if (s.readyState === 1) s.emit('message', txt);
+  });
+}
+
 function takenNames() {
   const s = new Set();
-  clients.forEach(v => s.add(v.name.toLowerCase()));
+  wsClients.forEach(v => s.add(v.name.toLowerCase()));
+  miniSessions.forEach(v => s.add(v.name.toLowerCase()));
   return s;
 }
 function uniqueName(raw) {
@@ -75,56 +63,199 @@ function uniqueName(raw) {
   while (taken.has(name.toLowerCase())) name = base + (i++);
   return name;
 }
+function onlineCount() { return wsClients.size + miniSessions.size; }
 
-// Histórico das últimas 50 mensagens (para mostrar ao entrar)
-const history = [];
-function pushHistory(msg) {
-  history.push(msg);
-  if (history.length > 50) history.shift();
+function genToken() {
+  const c = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let t = '';
+  for (let i = 0; i < 24; i++) t += c[Math.floor(Math.random() * c.length)];
+  return t;
 }
 
-// ── Eventos Socket.IO ────────────────────────────────────────
+// ════════════════════════════════════════════════════════════
+// HTTP SERVER
+// ════════════════════════════════════════════════════════════
+const server = http.createServer((req, res) => {
+  if (req.url && req.url.indexOf('/socket.io') === 0) return; // tratado pelo Socket.IO
+
+  const urlFull = req.url || '/';
+  const urlPath = urlFull.split('?')[0];
+
+  // ── API Opera Mini ──────────────────────────────────────
+  if (urlPath === '/mini/join'  && req.method === 'POST') { handleMiniJoin(req, res);  return; }
+  if (urlPath === '/mini/send'  && req.method === 'POST') { handleMiniSend(req, res);  return; }
+  if (urlPath === '/mini/chat')                           { handleMiniChat(req, res);  return; }
+
+  // ── Arquivos estáticos ──────────────────────────────────
+  const filePath = urlPath === '/' ? '/index.html' : urlPath;
+  const file = path.join(__dirname, 'public', filePath);
+  if (file.indexOf(path.join(__dirname, 'public')) !== 0) {
+    res.writeHead(403); res.end('Forbidden'); return;
+  }
+  fs.readFile(file, (err, data) => {
+    if (err) { res.writeHead(404); res.end('Not found'); return; }
+    const ext  = path.extname(file);
+    const mime = { '.html':'text/html', '.css':'text/css', '.js':'application/javascript' };
+    res.writeHead(200, { 'Content-Type': mime[ext] || 'text/plain; charset=utf-8' });
+    res.end(data);
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// API OPERA MINI — sem JS, sem WebSocket, só HTTP + formulário
+// ════════════════════════════════════════════════════════════
+
+// POST /mini/join  body: name=XXX
+function handleMiniJoin(req, res) {
+  collectBody(req, body => {
+    const params = parseQS(body);
+    const name   = uniqueName(params.name || 'Anonimo');
+    const color  = nextColor();
+    const token  = genToken();
+    miniSessions.set(token, { name, color, lastSeen: Date.now() });
+    const msg = { type:'user_join', name, color, ts:Date.now() };
+    pushHistory(msg);
+    broadcastWS({ ...msg, onlineCount: onlineCount() });
+    // Redireciona para a tela de chat
+    res.writeHead(302, { 'Location': '/mini/chat?token=' + token });
+    res.end();
+  });
+}
+
+// GET /mini/chat?token=T   — página principal Opera Mini (meta refresh)
+// POST /mini/chat          — ao enviar mensagem, redireciona de volta
+function handleMiniChat(req, res) {
+  const qs    = parseQS((req.url || '').split('?')[1] || '');
+  const token = qs.token || '';
+
+  if (req.method === 'POST') {
+    // Recebe mensagem via formulário
+    collectBody(req, body => {
+      const params = parseQS(body);
+      const tk     = params.token || token;
+      const text   = (params.text || '').trim().slice(0, 500);
+      const sess   = miniSessions.get(tk);
+      if (sess && text) {
+        sess.lastSeen = Date.now();
+        const msg = { type:'chat', name:sess.name, color:sess.color, text, ts:Date.now() };
+        pushHistory(msg);
+        broadcastWS(msg);
+      }
+      // Redireciona de volta para o chat (GET) — isso faz o Opera Mini recarregar
+      res.writeHead(302, { 'Location': '/mini/chat?token=' + (tk || '') });
+      res.end();
+    });
+    return;
+  }
+
+  // GET — renderiza a página com as mensagens
+  const sess = miniSessions.get(token);
+  if (!sess) {
+    // Sessão expirou — volta para login
+    res.writeHead(302, { 'Location': '/mini.html' });
+    res.end();
+    return;
+  }
+  sess.lastSeen = Date.now();
+
+  // Monta HTML das mensagens
+  let msgsHtml = '';
+  const msgs = history.slice(-40);
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.type === 'chat') {
+      const own = m.name === sess.name;
+      const cor = m.color || '#aaa';
+      const h   = new Date(m.ts || Date.now()).getHours();
+      const min = new Date(m.ts || Date.now()).getMinutes();
+      const t   = (h<10?'0':'')+h+':'+(min<10?'0':'')+min;
+      msgsHtml +=
+        '<div style="margin:6px 0;padding:5px 8px;background:' + (own?'#0d2a40':'#162030') + ';border-left:3px solid ' + cor + ';">' +
+        '<b style="color:' + escHtml(cor) + '">' + escHtml(m.name) + '</b>' +
+        '<span style="color:#2a4a62;font-size:10px;margin-left:6px">' + t + '</span><br>' +
+        escHtml(m.text) +
+        '</div>';
+    } else if (m.type === 'user_join') {
+      msgsHtml += '<div style="text-align:center;color:#2a5060;font-size:11px;margin:4px 0;font-style:italic">' + escHtml(m.name) + ' entrou</div>';
+    } else if (m.type === 'user_leave') {
+      msgsHtml += '<div style="text-align:center;color:#2a5060;font-size:11px;margin:4px 0;font-style:italic">' + escHtml(m.name) + ' saiu</div>';
+    }
+  }
+  if (!msgsHtml) msgsHtml = '<div style="text-align:center;color:#2a4a62;font-style:italic;margin-top:20px">Nenhuma mensagem ainda...</div>';
+
+  const online = onlineCount();
+  const html = '<!DOCTYPE html><html lang="pt-BR"><head>' +
+    '<meta charset="UTF-8">' +
+    '<meta name="viewport" content="width=device-width,initial-scale=1.0">' +
+    // META REFRESH: recarrega a cada 5 segundos automaticamente
+    '<meta http-equiv="refresh" content="5">' +
+    '<title>ChatLivre</title>' +
+    '<style>' +
+    'body{margin:0;background:#0f1923;color:#d4dde8;font-family:courier,monospace;font-size:13px}' +
+    '#hdr{background:#0d1c2a;border-bottom:1px solid #1e3a52;padding:8px 10px;position:fixed;top:0;left:0;right:0}' +
+    '#hdr span{color:#4fc3f7;font-size:14px;letter-spacing:2px;text-transform:uppercase}' +
+    '#hdr small{color:#456070;margin-left:8px}' +
+    '#hdr a{float:right;color:#ef5350;font-size:11px;text-decoration:none}' +
+    '#msgs{padding:50px 8px 70px;word-wrap:break-word}' +
+    '#form{position:fixed;bottom:0;left:0;right:0;background:#0d1c2a;border-top:1px solid #1e3a52;padding:8px;display:table;width:100%;box-sizing:border-box}' +
+    '#form input[type=text]{display:table-cell;width:100%;background:#0f1923;border:1px solid #1e3a52;color:#d4dde8;padding:7px 8px;font-family:courier,monospace;font-size:13px}' +
+    '#form input[type=submit]{display:table-cell;width:44px;background:#0d3050;border:1px solid #4fc3f7;color:#4fc3f7;font-size:14px;padding:7px}' +
+    '</style></head><body>' +
+    '<div id="hdr"><span>ChatLivre</span><small>' + online + ' online</small>' +
+    '<a href="/mini.html">Sair</a></div>' +
+    '<div id="msgs">' + msgsHtml + '</div>' +
+    '<form id="form" action="/mini/chat" method="POST">' +
+    '<input type="hidden" name="token" value="' + escHtml(token) + '">' +
+    '<input type="text" name="text" placeholder="Mensagem..." maxlength="500" autocomplete="off">' +
+    '<input type="submit" value="&#9658;">' +
+    '</form>' +
+    '</body></html>';
+
+  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.end(html);
+}
+
+// ════════════════════════════════════════════════════════════
+// SOCKET.IO (browsers modernos)
+// ════════════════════════════════════════════════════════════
+const io = new Server(server, {
+  allowEIO3: true,
+  cors: { origin: '*' },
+  pingTimeout:  60000,
+  pingInterval: 20000,
+  transports: ['polling', 'websocket'],
+  httpCompression: false
+});
+
 io.on('connection', (socket) => {
   let registered = false;
 
   socket.on('message', (rawData) => {
     let data;
-    try {
-      data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData;
-    } catch(e) { return; }
-
-    // Opera Mini envia poll_refresh para manter o canal vivo — só ignorar
+    try { data = typeof rawData === 'string' ? JSON.parse(rawData) : rawData; } catch(e) { return; }
     if (data.type === 'poll_refresh') return;
 
-    // ── JOIN ─────────────────────────────────────────────
     if (data.type === 'join') {
-      if (registered) return; // evita duplo registro
+      if (registered) return;
       const name  = uniqueName(data.name);
       const color = nextColor();
-      clients.set(socket.id, { name, color });
+      wsClients.set(socket, { name, color });
       registered = true;
-
-      // Boas-vindas com histórico para o próprio usuário
       socket.emit('message', JSON.stringify({
-        type: 'welcome',
-        name,
-        color,
+        type: 'welcome', name, color,
         onlineCount: onlineCount(),
         history: history.slice(-30)
       }));
-
-      // Avisa os demais
-      const joinMsg = { type:'user_join', name, color, onlineCount: onlineCount() };
-      pushHistory({ type:'user_join', name, color, ts: Date.now() });
-      socket.broadcast.emit('message', JSON.stringify(joinMsg));
+      const joinMsg = { type:'user_join', name, color, ts:Date.now() };
+      pushHistory({ ...joinMsg });
+      socket.broadcast.emit('message', JSON.stringify({ ...joinMsg, onlineCount: onlineCount() }));
       return;
     }
 
     if (!registered) return;
-    const me = clients.get(socket.id);
+    const me = wsClients.get(socket);
     if (!me) return;
 
-    // ── CHAT ─────────────────────────────────────────────
     if (data.type === 'chat') {
       const text = String(data.text || '').trim().slice(0, 500);
       if (!text) return;
@@ -134,22 +265,39 @@ io.on('connection', (socket) => {
     }
   });
 
-  // ── DISCONNECT ───────────────────────────────────────────
   socket.on('disconnect', () => {
     if (!registered) return;
-    const me = clients.get(socket.id);
+    const me = wsClients.get(socket);
     if (!me) return;
-    clients.delete(socket.id);
-    const leaveMsg = { type:'user_leave', name:me.name, color:me.color, onlineCount:onlineCount() };
-    pushHistory({ type:'user_leave', name:me.name, color:me.color, ts: Date.now() });
-    io.emit('message', JSON.stringify(leaveMsg));
+    wsClients.delete(socket);
+    const leaveMsg = { type:'user_leave', name:me.name, color:me.color, ts:Date.now() };
+    pushHistory(leaveMsg);
+    io.emit('message', JSON.stringify({ ...leaveMsg, onlineCount: onlineCount() }));
   });
 
-  socket.on('error', () => {
-    clients.delete(socket.id);
-  });
+  socket.on('error', () => wsClients.delete(socket));
 });
 
-server.listen(PORT, () => {
-  console.log('ChatLivre rodando na porta ' + PORT);
-});
+// ════════════════════════════════════════════════════════════
+// HELPERS
+// ════════════════════════════════════════════════════════════
+function parseQS(str) {
+  const obj = {};
+  if (!str) return obj;
+  str.split('&').forEach(pair => {
+    const idx = pair.indexOf('=');
+    if (idx < 0) return;
+    try { obj[decodeURIComponent(pair.slice(0,idx))] = decodeURIComponent(pair.slice(idx+1).replace(/\+/g,' ')); } catch(e) {}
+  });
+  return obj;
+}
+function collectBody(req, cb) {
+  let b = '';
+  req.on('data', c => { b += c; });
+  req.on('end',  () => cb(b));
+}
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+server.listen(PORT, () => console.log('ChatLivre na porta ' + PORT));

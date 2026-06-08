@@ -6,7 +6,7 @@ const { Server } = require('socket.io');
 const PORT = process.env.PORT || 3000;
 
 // ════════════════════════════════════════════════════════════
-// ESTADO COMPARTILHADO (Socket.IO + Opera Mini)
+// ESTADO COMPARTILHADO
 // ════════════════════════════════════════════════════════════
 const COLORS = [
   '#f87171','#fb923c','#fbbf24','#a3e635',
@@ -16,43 +16,43 @@ const COLORS = [
 let colorIndex = 0;
 function nextColor() { return COLORS[(colorIndex++) % COLORS.length]; }
 
-// Histórico global — usado pelos dois modos
 const history = [];
 function pushHistory(msg) {
-  msg.id = Date.now() + Math.random();
   history.push(msg);
   if (history.length > 100) history.shift();
 }
 
-// Clientes Socket.IO
-const wsClients = new Map(); // socket.id -> { name, color }
+// Clientes Socket.IO: socket -> { name, color }
+const wsClients = new Map();
 
 // Sessões Opera Mini: token -> { name, color, lastSeen }
 const miniSessions = new Map();
 
-// Limpa sessões Opera Mini inativas (> 40s)
+// Limpa sessões Opera Mini inativas > 45s
 setInterval(() => {
   const now = Date.now();
   miniSessions.forEach((sess, token) => {
-    if (now - sess.lastSeen > 40000) {
+    if (now - sess.lastSeen > 45000) {
       miniSessions.delete(token);
       const msg = { type:'user_leave', name:sess.name, color:sess.color, ts:Date.now() };
       pushHistory(msg);
-      broadcastWS(msg);
+      broadcastSocketIO({ ...msg, onlineCount: onlineCount() });
     }
   });
 }, 15000);
 
-function broadcastWS(data) {
+// Broadcast para clientes Socket.IO
+// CORRIGIDO: usa socket.connected em vez de readyState
+function broadcastSocketIO(data) {
   const txt = JSON.stringify(data);
-  wsClients.forEach((_, s) => {
-    if (s.readyState === 1) s.emit('message', txt);
+  wsClients.forEach((info, sock) => {
+    if (sock.connected) sock.emit('message', txt);
   });
 }
 
 function takenNames() {
   const s = new Set();
-  wsClients.forEach(v => s.add(v.name.toLowerCase()));
+  wsClients.forEach(v  => s.add(v.name.toLowerCase()));
   miniSessions.forEach(v => s.add(v.name.toLowerCase()));
   return s;
 }
@@ -76,17 +76,16 @@ function genToken() {
 // HTTP SERVER
 // ════════════════════════════════════════════════════════════
 const server = http.createServer((req, res) => {
-  if (req.url && req.url.indexOf('/socket.io') === 0) return; // tratado pelo Socket.IO
+  if (req.url && req.url.indexOf('/socket.io') === 0) return;
 
   const urlFull = req.url || '/';
   const urlPath = urlFull.split('?')[0];
 
-  // ── API Opera Mini ──────────────────────────────────────
-  if (urlPath === '/mini/join'  && req.method === 'POST') { handleMiniJoin(req, res);  return; }
-  if (urlPath === '/mini/send'  && req.method === 'POST') { handleMiniSend(req, res);  return; }
-  if (urlPath === '/mini/chat')                           { handleMiniChat(req, res);  return; }
+  // Rotas Opera Mini
+  if (urlPath === '/mini/join' && req.method === 'POST') { handleMiniJoin(req, res); return; }
+  if (urlPath === '/mini/chat')                          { handleMiniChat(req, res); return; }
 
-  // ── Arquivos estáticos ──────────────────────────────────
+  // Arquivos estáticos
   const filePath = urlPath === '/' ? '/index.html' : urlPath;
   const file = path.join(__dirname, 'public', filePath);
   if (file.indexOf(path.join(__dirname, 'public')) !== 0) {
@@ -96,16 +95,16 @@ const server = http.createServer((req, res) => {
     if (err) { res.writeHead(404); res.end('Not found'); return; }
     const ext  = path.extname(file);
     const mime = { '.html':'text/html', '.css':'text/css', '.js':'application/javascript' };
-    res.writeHead(200, { 'Content-Type': mime[ext] || 'text/plain; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': (mime[ext] || 'text/plain') + '; charset=utf-8' });
     res.end(data);
   });
 });
 
 // ════════════════════════════════════════════════════════════
-// API OPERA MINI — sem JS, sem WebSocket, só HTTP + formulário
+// ROTAS OPERA MINI
 // ════════════════════════════════════════════════════════════
 
-// POST /mini/join  body: name=XXX
+// POST /mini/join  — recebe nome, cria sessão, redireciona para o chat
 function handleMiniJoin(req, res) {
   collectBody(req, body => {
     const params = parseQS(body);
@@ -115,21 +114,20 @@ function handleMiniJoin(req, res) {
     miniSessions.set(token, { name, color, lastSeen: Date.now() });
     const msg = { type:'user_join', name, color, ts:Date.now() };
     pushHistory(msg);
-    broadcastWS({ ...msg, onlineCount: onlineCount() });
-    // Redireciona para a tela de chat
+    broadcastSocketIO({ ...msg, onlineCount: onlineCount() });
     res.writeHead(302, { 'Location': '/mini/chat?token=' + token });
     res.end();
   });
 }
 
-// GET /mini/chat?token=T   — página principal Opera Mini (meta refresh)
-// POST /mini/chat          — ao enviar mensagem, redireciona de volta
+// GET  /mini/chat?token=T  — exibe mensagens com meta refresh
+// POST /mini/chat          — recebe mensagem do formulário
 function handleMiniChat(req, res) {
   const qs    = parseQS((req.url || '').split('?')[1] || '');
   const token = qs.token || '';
 
+  // POST: salva mensagem e redireciona de volta
   if (req.method === 'POST') {
-    // Recebe mensagem via formulário
     collectBody(req, body => {
       const params = parseQS(body);
       const tk     = params.token || token;
@@ -139,75 +137,76 @@ function handleMiniChat(req, res) {
         sess.lastSeen = Date.now();
         const msg = { type:'chat', name:sess.name, color:sess.color, text, ts:Date.now() };
         pushHistory(msg);
-        broadcastWS(msg);
+        broadcastSocketIO(msg);
       }
-      // Redireciona de volta para o chat (GET) — isso faz o Opera Mini recarregar
-      res.writeHead(302, { 'Location': '/mini/chat?token=' + (tk || '') });
+      res.writeHead(302, { 'Location': '/mini/chat?token=' + encodeURIComponent(tk) });
       res.end();
     });
     return;
   }
 
-  // GET — renderiza a página com as mensagens
+  // GET: renderiza página
   const sess = miniSessions.get(token);
   if (!sess) {
-    // Sessão expirou — volta para login
     res.writeHead(302, { 'Location': '/mini.html' });
     res.end();
     return;
   }
   sess.lastSeen = Date.now();
 
-  // Monta HTML das mensagens
+  // Monta mensagens
   let msgsHtml = '';
   const msgs = history.slice(-40);
   for (let i = 0; i < msgs.length; i++) {
     const m = msgs[i];
     if (m.type === 'chat') {
-      const own = m.name === sess.name;
+      const own = (m.name === sess.name);
       const cor = m.color || '#aaa';
-      const h   = new Date(m.ts || Date.now()).getHours();
-      const min = new Date(m.ts || Date.now()).getMinutes();
-      const t   = (h<10?'0':'')+h+':'+(min<10?'0':'')+min;
+      const d   = new Date(m.ts || Date.now());
+      const t   = (d.getHours()<10?'0':'') + d.getHours() + ':' + (d.getMinutes()<10?'0':'') + d.getMinutes();
       msgsHtml +=
-        '<div style="margin:6px 0;padding:5px 8px;background:' + (own?'#0d2a40':'#162030') + ';border-left:3px solid ' + cor + ';">' +
+        '<div style="margin:6px 0;padding:5px 8px;background:' + (own?'#0d2a40':'#162030') + ';border-left:3px solid ' + escHtml(cor) + '">' +
         '<b style="color:' + escHtml(cor) + '">' + escHtml(m.name) + '</b>' +
-        '<span style="color:#2a4a62;font-size:10px;margin-left:6px">' + t + '</span><br>' +
-        escHtml(m.text) +
-        '</div>';
+        ' <span style="color:#2a4a62;font-size:10px">' + t + '</span><br>' +
+        escHtml(m.text) + '</div>';
     } else if (m.type === 'user_join') {
-      msgsHtml += '<div style="text-align:center;color:#2a5060;font-size:11px;margin:4px 0;font-style:italic">' + escHtml(m.name) + ' entrou</div>';
+      msgsHtml += '<p style="text-align:center;color:#2a5060;font-size:11px;margin:3px 0"><i>' + escHtml(m.name) + ' entrou</i></p>';
     } else if (m.type === 'user_leave') {
-      msgsHtml += '<div style="text-align:center;color:#2a5060;font-size:11px;margin:4px 0;font-style:italic">' + escHtml(m.name) + ' saiu</div>';
+      msgsHtml += '<p style="text-align:center;color:#2a5060;font-size:11px;margin:3px 0"><i>' + escHtml(m.name) + ' saiu</i></p>';
     }
   }
-  if (!msgsHtml) msgsHtml = '<div style="text-align:center;color:#2a4a62;font-style:italic;margin-top:20px">Nenhuma mensagem ainda...</div>';
+  if (!msgsHtml) msgsHtml = '<p style="text-align:center;color:#2a4a62;margin-top:30px"><i>Nenhuma mensagem ainda...</i></p>';
 
-  const online = onlineCount();
-  const html = '<!DOCTYPE html><html lang="pt-BR"><head>' +
+  const safeToken = encodeURIComponent(token);
+
+  // CORRIGIDO: meta refresh inclui o token na URL para não perder a sessão
+  const html =
+    '<!DOCTYPE html><html lang="pt-BR"><head>' +
     '<meta charset="UTF-8">' +
     '<meta name="viewport" content="width=device-width,initial-scale=1.0">' +
-    // META REFRESH: recarrega a cada 5 segundos automaticamente
-    '<meta http-equiv="refresh" content="5">' +
+    '<meta http-equiv="refresh" content="5;url=/mini/chat?token=' + safeToken + '">' +
     '<title>ChatLivre</title>' +
     '<style>' +
     'body{margin:0;background:#0f1923;color:#d4dde8;font-family:courier,monospace;font-size:13px}' +
-    '#hdr{background:#0d1c2a;border-bottom:1px solid #1e3a52;padding:8px 10px;position:fixed;top:0;left:0;right:0}' +
-    '#hdr span{color:#4fc3f7;font-size:14px;letter-spacing:2px;text-transform:uppercase}' +
+    '#hdr{background:#0d1c2a;border-bottom:1px solid #1e3a52;padding:8px 10px}' +
+    '#hdr b{color:#4fc3f7;font-size:14px;letter-spacing:2px}' +
     '#hdr small{color:#456070;margin-left:8px}' +
-    '#hdr a{float:right;color:#ef5350;font-size:11px;text-decoration:none}' +
-    '#msgs{padding:50px 8px 70px;word-wrap:break-word}' +
-    '#form{position:fixed;bottom:0;left:0;right:0;background:#0d1c2a;border-top:1px solid #1e3a52;padding:8px;display:table;width:100%;box-sizing:border-box}' +
-    '#form input[type=text]{display:table-cell;width:100%;background:#0f1923;border:1px solid #1e3a52;color:#d4dde8;padding:7px 8px;font-family:courier,monospace;font-size:13px}' +
-    '#form input[type=submit]{display:table-cell;width:44px;background:#0d3050;border:1px solid #4fc3f7;color:#4fc3f7;font-size:14px;padding:7px}' +
+    '#hdr a{float:right;color:#ef5350;font-size:11px}' +
+    '#msgs{padding:8px 8px 80px;word-wrap:break-word}' +
+    'form{background:#0d1c2a;border-top:1px solid #1e3a52;padding:8px;' +
+    'position:fixed;bottom:0;left:0;right:0}' +
+    'form input[type=text]{width:78%;background:#0f1923;border:1px solid #1e3a52;' +
+    'color:#d4dde8;padding:7px 8px;font-family:courier,monospace;font-size:13px}' +
+    'form input[type=submit]{width:18%;background:#0d3050;border:1px solid #4fc3f7;' +
+    'color:#4fc3f7;font-size:14px;padding:7px;margin-left:2%}' +
     '</style></head><body>' +
-    '<div id="hdr"><span>ChatLivre</span><small>' + online + ' online</small>' +
+    '<div id="hdr"><b>ChatLivre</b><small>' + onlineCount() + ' online</small>' +
     '<a href="/mini.html">Sair</a></div>' +
     '<div id="msgs">' + msgsHtml + '</div>' +
-    '<form id="form" action="/mini/chat" method="POST">' +
+    '<form action="/mini/chat" method="POST">' +
     '<input type="hidden" name="token" value="' + escHtml(token) + '">' +
     '<input type="text" name="text" placeholder="Mensagem..." maxlength="500" autocomplete="off">' +
-    '<input type="submit" value="&#9658;">' +
+    '<input type="submit" value="OK">' +
     '</form>' +
     '</body></html>';
 
@@ -216,7 +215,7 @@ function handleMiniChat(req, res) {
 }
 
 // ════════════════════════════════════════════════════════════
-// SOCKET.IO (browsers modernos)
+// SOCKET.IO (Chrome, Firefox, browsers modernos)
 // ════════════════════════════════════════════════════════════
 const io = new Server(server, {
   allowEIO3: true,
@@ -242,12 +241,12 @@ io.on('connection', (socket) => {
       wsClients.set(socket, { name, color });
       registered = true;
       socket.emit('message', JSON.stringify({
-        type: 'welcome', name, color,
+        type:'welcome', name, color,
         onlineCount: onlineCount(),
         history: history.slice(-30)
       }));
       const joinMsg = { type:'user_join', name, color, ts:Date.now() };
-      pushHistory({ ...joinMsg });
+      pushHistory(joinMsg);
       socket.broadcast.emit('message', JSON.stringify({ ...joinMsg, onlineCount: onlineCount() }));
       return;
     }
@@ -287,7 +286,10 @@ function parseQS(str) {
   str.split('&').forEach(pair => {
     const idx = pair.indexOf('=');
     if (idx < 0) return;
-    try { obj[decodeURIComponent(pair.slice(0,idx))] = decodeURIComponent(pair.slice(idx+1).replace(/\+/g,' ')); } catch(e) {}
+    try {
+      obj[decodeURIComponent(pair.slice(0, idx))] =
+        decodeURIComponent(pair.slice(idx + 1).replace(/\+/g, ' '));
+    } catch(e) {}
   });
   return obj;
 }
@@ -297,7 +299,9 @@ function collectBody(req, cb) {
   req.on('end',  () => cb(b));
 }
 function escHtml(s) {
-  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  return String(s || '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
 server.listen(PORT, () => console.log('ChatLivre na porta ' + PORT));
